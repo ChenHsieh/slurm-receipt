@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "slurm-receipt"
+version = "0.1.0"
+description = "See what your HPC compute really cost -- in dollars, energy, and burgers."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.8"
+authors = [{ name = "ch29576" }]
+keywords = ["slurm", "hpc", "receipt", "energy", "cost"]
+classifiers = [
+    "Environment :: Console :: Curses",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: System :: Monitoring",
+]
+
+[project.scripts]
+slurm-receipt = "slurm_receipt.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/slurm_receipt"]
+
+[project.urls]
+Homepage = "https://github.com/YOUR_USER/slurm-receipt"
