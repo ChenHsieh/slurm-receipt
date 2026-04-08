@@ -13,13 +13,10 @@ GPU_TDP_W = {
 PUE = 1.3
 CO2_KG_PER_KWH = 0.4  # US Southeast grid
 
-# Cloud pricing (USD/hour, on-demand)
-CLOUD_CPU_HR = {"aws": 0.05, "gcp": 0.045}
-CLOUD_GPU_HR = {
-    "aws": {"a100": 4.10, "h100": 8.00, "l4": 0.81, "l40s": 2.80, "v100": 3.06, "p100": 1.46, "t4": 0.53},
-    "gcp": {"a100": 3.67, "h100": 6.98, "l4": 0.70, "l40s": 2.50, "v100": 2.48, "p100": 1.46, "t4": 0.35},
-}
-CLOUD_MEM_GB_HR = {"aws": 0.005, "gcp": 0.004}
+# Cloud pricing -- AWS on-demand (USD/hour, US regions, 2026)
+AWS_CPU_HR = 0.05
+AWS_GPU_HR = {"a100": 4.10, "h100": 8.00, "l4": 0.81, "l40s": 2.80, "v100": 3.06, "p100": 1.46, "t4": 0.53}
+AWS_MEM_GB_HR = 0.005
 
 
 # ── Pop-culture conversions ─────────────────────────────────────────
@@ -435,17 +432,14 @@ def energy(stats):
 
 
 def cloud_cost(stats):
-    """Estimate cloud-equivalent cost."""
-    costs = {}
-    for p in ("aws", "gcp"):
-        cpu = stats["total_cpu_hours"] * CLOUD_CPU_HR[p]
-        gpu = sum(
-            hrs * CLOUD_GPU_HR[p].get(gt, 3.0)
-            for gt, hrs in stats["gpu_hours_by_type"].items()
-        )
-        mem = stats["total_mem_gb_hours"] * CLOUD_MEM_GB_HR[p]
-        costs[p] = {"cpu": cpu, "gpu": gpu, "mem": mem, "total": cpu + gpu + mem}
-    return costs
+    """Estimate AWS on-demand equivalent cost."""
+    cpu = stats["total_cpu_hours"] * AWS_CPU_HR
+    gpu = sum(
+        hrs * AWS_GPU_HR.get(gt, 3.0)
+        for gt, hrs in stats["gpu_hours_by_type"].items()
+    )
+    mem = stats["total_mem_gb_hours"] * AWS_MEM_GB_HR
+    return {"cpu": cpu, "gpu": gpu, "mem": mem, "total": cpu + gpu + mem}
 
 
 def convert(kwh, co2_kg, mem_gb_hours, conv):

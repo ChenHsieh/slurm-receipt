@@ -3,28 +3,22 @@
 import base64
 import curses
 import os
+import sys
 import random
 from datetime import datetime, timedelta
 
 from slurm_receipt.calc import CONVERSIONS, convert, get_mascot
+from slurm_receipt.roast import generate_roasts
 
 
 def _osc52_copy(text):
-    """Copy text to the user's local clipboard via OSC 52 escape sequence.
-
-    This works over SSH -- the terminal interprets the escape and copies
-    to its own clipboard. Supported by: iTerm2, kitty, alacritty,
-    Windows Terminal, foot, WezTerm, tmux (with set -g set-clipboard on).
-    Silently does nothing on unsupported terminals.
-    """
+    """Copy to clipboard via OSC 52, with tmux passthrough support."""
     encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-    # OSC 52 ; c ; <base64> ST
-    sys.stdout.write(f"\033]52;c;{encoded}\a")
+    if os.environ.get("TMUX"):
+        sys.stdout.write(f"\033Ptmux;\033\033]52;c;{encoded}\a\033\\")
+    else:
+        sys.stdout.write(f"\033]52;c;{encoded}\a")
     sys.stdout.flush()
-
-
-# Need sys for _osc52_copy
-import sys
 
 
 W = 52  # receipt inner width
@@ -68,17 +62,17 @@ def _fmt_time(sec):
         return f"{int(sec // 3600)}h{int((sec % 3600) // 60)}m"
 
 
+# ── Page builders ────────────────────────────────────────────────────
+
 def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
-    """Build main receipt as list of (line_string, attr_name) tuples."""
+    """Build main receipt."""
     lines = []
     a = lines.append
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     start_str = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-
     mascot = get_mascot(stats["total_cpu_hours"], user)
 
-    # ── Mascot header ──
     a(("=" * W, "dim"))
     a(("", "normal"))
     for art_line in mascot["art"]:
@@ -91,7 +85,7 @@ def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
     a((f"  Days:      {days}", "normal"))
     a(("", "normal"))
 
-    # ── Order summary ──
+    # Order summary
     a(("-" * W, "dim"))
     a((_ctr("ORDER SUMMARY"), "heading"))
     a(("-" * W, "dim"))
@@ -100,8 +94,8 @@ def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
     total = stats["total_jobs"]
     a((_right("  Jobs submitted", f"{total:,}"), "normal"))
     a((_right("    Completed", f"{stats['completed']:,}"), "normal"))
-    fail_attr = "highlight" if stats["failed"] > 0 else "normal"
-    a((_right("    Failed", f"{stats['failed']:,}"), fail_attr))
+    a((_right("    Failed", f"{stats['failed']:,}"),
+       "highlight" if stats["failed"] > 0 else "normal"))
     if stats["cancelled"]:
         a((_right("    Cancelled", f"{stats['cancelled']:,}"), "dim"))
     if stats.get("timeout", 0):
@@ -109,11 +103,10 @@ def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
     a(("", "normal"))
 
     pct = (stats["completed"] / total * 100) if total else 0
-    bar = _bar(stats["completed"], total, 28)
-    a((f"  Success: {bar} {pct:.0f}%", "bar"))
+    a((f"  Success: {_bar(stats['completed'], total, 28)} {pct:.0f}%", "bar"))
     a(("", "normal"))
 
-    # ── Compute charges ──
+    # Compute charges
     a(("-" * W, "dim"))
     a((_ctr("COMPUTE CHARGES"), "heading"))
     a(("-" * W, "dim"))
@@ -127,7 +120,7 @@ def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
     a((_right("  Memory", f"{_fmt(stats['total_mem_gb_hours'])} GB-hrs"), "dim"))
     a(("", "normal"))
 
-    # ── Energy ──
+    # Energy
     a((_right("  Energy (CPU)", f"{_fmt(nrg['cpu_kwh'])} kWh"), "normal"))
     if nrg["gpu_kwh"] > 0:
         a((_right("  Energy (GPU)", f"{_fmt(nrg['gpu_kwh'])} kWh"), "normal"))
@@ -137,18 +130,20 @@ def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
     a((_right("  CO2 emitted", f"{_fmt(nrg['co2_kg'])} kg"), "normal"))
     a(("", "normal"))
 
-    # ── Cloud costs ──
+    # AWS cost
     a(("-" * W, "dim"))
-    a((_ctr("CLOUD PRICE CHECK"), "heading"))
-    a((_ctr("(if you had to pay on-demand)"), "dim"))
+    a((_ctr("AWS PRICE CHECK (on-demand)"), "heading"))
     a(("-" * W, "dim"))
     a(("", "normal"))
-    for p in ("aws", "gcp"):
-        c = costs[p]
-        a((_right(f"  {p.upper()} total", f"${c['total']:,.2f}"), "highlight"))
+    a((_right("  Compute (CPU)", f"${costs['cpu']:,.2f}"), "normal"))
+    if costs["gpu"] > 0:
+        a((_right("  Compute (GPU)", f"${costs['gpu']:,.2f}"), "normal"))
+    a((_right("  Memory", f"${costs['mem']:,.2f}"), "dim"))
+    a(("  " + "-" * (W - 4), "dim"))
+    a((_right("  TOTAL", f"${costs['total']:,.2f}"), "highlight"))
     a(("", "normal"))
 
-    # ── Fun conversion (single, rotatable) ──
+    # Fun conversion (single, rotatable)
     a(("*" * W, "dim"))
     a((_ctr("BUT ACTUALLY..."), "heading"))
     a(("*" * W, "dim"))
@@ -164,19 +159,147 @@ def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
     a(("", "normal"))
     idx_display = conv_idx % len(CONVERSIONS) + 1
     cat = conv.get("category", "")
-    a((_ctr(f"[{idx_display}/{len(CONVERSIONS)}] ({cat})  < / > to browse"), "dim"))
+    a((_ctr(f"[{idx_display}/{len(CONVERSIONS)}] ({cat})"), "dim"))
     a(("", "normal"))
 
-    # ── Footer ──
+    # Footer
     a(("=" * W, "dim"))
     a((_ctr("THANK YOU FOR COMPUTING"), "title"))
     a((_ctr("Please come again."), "dim"))
     a((_ctr("No refunds on failed jobs."), "dim"))
     a(("=" * W, "dim"))
-    a(("", "normal"))
-    a((_ctr("[r]oast [m]onthly [t]op jobs [s]nap [q]uit"), "dim"))
 
     return lines
+
+
+def build_heatmap_page(stats, days):
+    """GitHub-style contribution heatmap for job submissions."""
+    lines = []
+    a = lines.append
+    daily = stats.get("daily", {})
+
+    a(("=" * W, "dim"))
+    a((_ctr("ACTIVITY HEATMAP"), "title"))
+    a(("=" * W, "dim"))
+    a(("", "normal"))
+
+    if not daily:
+        a((_ctr("No daily data available."), "dim"))
+        return lines
+
+    # Determine date range
+    end = datetime.now()
+    start = end - timedelta(days=min(days, 365))
+
+    # Build a grid: columns = weeks, rows = weekdays (Mon-Sun)
+    # Each cell = one day, intensity based on job count
+    DOTS = [" ", ".", "o", "O", "#"]  # intensity levels
+
+    # Find max for scaling
+    max_count = max(daily.values()) if daily else 1
+    if max_count == 0:
+        max_count = 1
+
+    def _intensity(count):
+        if count == 0:
+            return 0
+        pct = count / max_count
+        if pct < 0.15:
+            return 1
+        elif pct < 0.40:
+            return 2
+        elif pct < 0.70:
+            return 3
+        else:
+            return 4
+
+    # Generate weeks from start to end
+    # Align start to a Monday
+    cur = start - timedelta(days=start.weekday())
+    weeks = []
+    while cur <= end:
+        week = []
+        for dow in range(7):
+            d = cur + timedelta(days=dow)
+            key = d.strftime("%Y-%m-%d")
+            count = daily.get(key, 0)
+            in_range = start <= d <= end
+            week.append((d, count, in_range))
+        weeks.append(week)
+        cur += timedelta(days=7)
+
+    # Limit to fit in receipt width (~48 usable chars)
+    # Each week = 1 char + 1 space, so ~24 weeks visible
+    max_weeks = (W - 6) // 2  # leave room for day labels
+    if len(weeks) > max_weeks:
+        weeks = weeks[-max_weeks:]
+
+    # Month labels across the top
+    month_row = "     "
+    prev_month = ""
+    for wi, week in enumerate(weeks):
+        # Use the Monday of each week for month label
+        m = week[0][0].strftime("%b")
+        if m != prev_month:
+            month_row += m[0]
+            prev_month = m
+        else:
+            month_row += " "
+        month_row += " "
+    a((month_row[:W], "dim"))
+
+    # Day rows: Mon, Wed, Fri shown, others just dots
+    day_labels = ["M", " ", "W", " ", "F", " ", "S"]
+    for dow in range(7):
+        row = f"  {day_labels[dow]}  "
+        for week in weeks:
+            d, count, in_range = week[dow]
+            if not in_range:
+                row += "  "
+            else:
+                dot = DOTS[_intensity(count)]
+                row += dot + " "
+        a((row[:W], "bar" if dow < 5 else "dim"))
+
+    a(("", "normal"))
+
+    # Legend
+    legend = "  Less " + " ".join(DOTS) + " More"
+    a((legend, "dim"))
+    a(("", "normal"))
+
+    # Summary stats
+    total_days = len(daily)
+    active_days = sum(1 for v in daily.values() if v > 0)
+    if total_days > 0:
+        a((_right("  Active days", f"{active_days}/{total_days}"), "normal"))
+        streak = _longest_streak(daily, start, end)
+        if streak > 1:
+            a((_right("  Longest streak", f"{streak} days"), "highlight"))
+
+    # Busiest day callout
+    if daily:
+        peak_day = max(daily.items(), key=lambda x: x[1])
+        a((_right("  Peak day", f"{peak_day[0]} ({peak_day[1]:,})"), "highlight"))
+
+    a(("", "normal"))
+    return lines
+
+
+def _longest_streak(daily, start, end):
+    """Find longest consecutive days with at least 1 job."""
+    cur = start
+    streak = 0
+    best = 0
+    while cur <= end:
+        key = cur.strftime("%Y-%m-%d")
+        if daily.get(key, 0) > 0:
+            streak += 1
+            best = max(best, streak)
+        else:
+            streak = 0
+        cur += timedelta(days=1)
+    return best
 
 
 def build_monthly_page(stats):
@@ -192,8 +315,6 @@ def build_monthly_page(stats):
     monthly = stats.get("monthly", {})
     if not monthly:
         a((_ctr("No monthly data available."), "dim"))
-        a(("", "normal"))
-        a((_ctr("[b]ack"), "dim"))
         return lines
 
     a(("  Month     Jobs   OK   Fail   CPU-hrs", "heading"))
@@ -216,7 +337,6 @@ def build_monthly_page(stats):
 
     a(("", "normal"))
 
-    # Monthly summary insights
     sorted_months = sorted(monthly.items(), key=lambda x: x[1]["jobs"], reverse=True)
     if sorted_months:
         peak = sorted_months[0]
@@ -225,14 +345,11 @@ def build_monthly_page(stats):
         if peak[1]["failed"] > peak[1]["jobs"] * 0.3:
             a(("  ...and it was rough.", "roast"))
     a(("", "normal"))
-
-    a(("-" * W, "dim"))
-    a((_ctr("[b]ack to receipt"), "dim"))
     return lines
 
 
-def build_roast_page(roasts):
-    """Roast / performance review page."""
+def build_roast_page(roasts, roast_idx):
+    """Roast page -- shows one roast at a time, rotatable."""
     lines = []
     a = lines.append
 
@@ -241,14 +358,20 @@ def build_roast_page(roasts):
     a((_ctr("(the cluster has thoughts)"), "dim"))
     a(("=" * W, "dim"))
     a(("", "normal"))
+    a(("", "normal"))
 
-    for roast in roasts:
+    if roasts:
+        idx = roast_idx % len(roasts)
+        roast = roasts[idx]
         for rline in roast.split("\n"):
             a((rline, "roast"))
         a(("", "normal"))
+        a(("", "normal"))
+        a((_ctr(f"[{idx + 1}/{len(roasts)}]"), "dim"))
+    else:
+        a((_ctr("Nothing to roast. Suspiciously clean."), "dim"))
 
-    a(("-" * W, "dim"))
-    a((_ctr("[b]ack to receipt"), "dim"))
+    a(("", "normal"))
     return lines
 
 
@@ -270,7 +393,6 @@ def build_top_jobs_page(stats):
 
     a(("", "normal"))
 
-    # Fastest fails
     fast = stats.get("fastest_fails", [])
     if fast:
         a(("-" * W, "dim"))
@@ -280,42 +402,30 @@ def build_top_jobs_page(stats):
         a(("", "normal"))
         shown = {}
         for j in fast[:20]:
-            n = j["name"]
-            shown[n] = shown.get(n, 0) + 1
+            shown[j["name"]] = shown.get(j["name"], 0) + 1
         for n, c in sorted(shown.items(), key=lambda x: -x[1])[:5]:
             short = (n[:30] + "..") if len(n) > 32 else n
             a((f"    {short:<32s} x{c}", "highlight"))
         a(("", "normal"))
 
-    # Slow painful deaths
     slow = stats.get("slowest_fails", [])
     if slow:
         a(("-" * W, "dim"))
         a((_ctr("SLOW AND PAINFUL"), "heading"))
-        a((_ctr("(jobs that ran forever, then failed)"), "dim"))
         a(("-" * W, "dim"))
         for j in slow[:5]:
             short = (j["name"][:26] + "..") if len(j["name"]) > 28 else j["name"]
             a((f"    {short:<28s} ran {_fmt_time(j['elapsed_sec']):>8}", "highlight"))
         a(("", "normal"))
 
-    a(("-" * W, "dim"))
-    a((_ctr("[b]ack to receipt"), "dim"))
     return lines
 
 
 def render_snap(user, days, stats, nrg, costs, roasts, conv_idx=0):
-    """Plain-text receipt for copy-paste or screenshot sharing."""
+    """Plain-text receipt for sharing."""
     pages = build_receipt_page(user, days, stats, nrg, costs, conv_idx)
-    out = []
-    for text, _ in pages:
-        if "[r]oast" in text and "[m]onthly" in text:
-            continue
-        if "< / > to browse" in text:
-            continue
-        out.append(text)
+    out = [text for text, _ in pages]
 
-    # Append one random roast
     if roasts:
         out.append("")
         out.append("-" * W)
@@ -333,6 +443,8 @@ def render_snap(user, days, stats, nrg, costs, roasts, conv_idx=0):
     return "\n".join(out)
 
 
+# ── TUI main loop ───────────────────────────────────────────────────
+
 def run_tui(user, days, stats, nrg, costs, roasts):
     """Launch interactive curses TUI."""
     curses.wrapper(_tui_main, user, days, stats, nrg, costs, roasts)
@@ -343,18 +455,19 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts):
     curses.start_color()
     curses.use_default_colors()
 
-    # Enable mouse support
-    curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
-    # Some terminals need this escape to enable mouse tracking
-    print("\033[?1003h", end="", flush=True)
+    # Mouse: click + scroll only (no motion tracking -- avoids flicker)
+    curses.mousemask(
+        curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED
+        | curses.BUTTON4_PRESSED | 0x200000
+    )
 
-    curses.init_pair(1, curses.COLOR_YELLOW, -1)   # title
-    curses.init_pair(2, curses.COLOR_CYAN, -1)     # heading
-    curses.init_pair(3, 8, -1)                      # dim
-    curses.init_pair(4, curses.COLOR_GREEN, -1)    # highlight
-    curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # roast
-    curses.init_pair(6, curses.COLOR_WHITE, -1)    # conversion
-    curses.init_pair(7, curses.COLOR_BLUE, -1)     # bar
+    curses.init_pair(1, curses.COLOR_YELLOW, -1)
+    curses.init_pair(2, curses.COLOR_CYAN, -1)
+    curses.init_pair(3, 8, -1)
+    curses.init_pair(4, curses.COLOR_GREEN, -1)
+    curses.init_pair(5, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(6, curses.COLOR_WHITE, -1)
+    curses.init_pair(7, curses.COLOR_BLUE, -1)
 
     ATTRS = {
         "title":      curses.color_pair(1) | curses.A_BOLD,
@@ -368,31 +481,31 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts):
     }
 
     conv_idx = 0
+    roast_idx = 0
     page = "receipt"
     scroll = 0
     home_dir = os.path.expanduser("~")
 
-    # Status bar button regions for mouse click detection
-    # (label, action, page_filter)
-    RECEIPT_BUTTONS = [
-        ("r:roast", "roast", "receipt"),
-        ("m:monthly", "monthly", "receipt"),
-        ("t:top", "top", "receipt"),
-        ("s:snap", "snap", "receipt"),
-        ("<:prev", "prev", "receipt"),
-        (">:next", "next", "receipt"),
-    ]
+    # Build roast pool for rotation
+    all_roasts = list(roasts)
+    for _ in range(4):
+        for r in generate_roasts(stats):
+            if r not in all_roasts:
+                all_roasts.append(r)
 
     while True:
-        stdscr.clear()
+        stdscr.erase()
         h, w = stdscr.getmaxyx()
 
+        # Build current page
         if page == "receipt":
             content = build_receipt_page(user, days, stats, nrg, costs, conv_idx)
+        elif page == "heatmap":
+            content = build_heatmap_page(stats, days)
         elif page == "monthly":
             content = build_monthly_page(stats)
         elif page == "roast":
-            content = build_roast_page(roasts)
+            content = build_roast_page(all_roasts, roast_idx)
         elif page == "top":
             content = build_top_jobs_page(stats)
         else:
@@ -401,99 +514,96 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts):
         max_scroll = max(0, len(content) - h + 2)
         scroll = max(0, min(scroll, max_scroll))
 
+        # Render content
         for i, (text, attr_name) in enumerate(content[scroll:]):
-            row = i
-            if row >= h - 1:
+            if i >= h - 1:
                 break
             attr = ATTRS.get(attr_name, curses.A_NORMAL)
             pad_left = max(0, (w - W) // 2)
+            display = text[:w - pad_left - 1].ljust(W)[:w - pad_left - 1]
             try:
-                stdscr.addnstr(row, pad_left, text[:w - pad_left - 1], w - pad_left - 1, attr)
+                stdscr.addnstr(i, pad_left, display, w - pad_left - 1, attr)
             except curses.error:
                 pass
 
-        # Status bar with scroll indicator
-        scroll_pct = ""
-        if max_scroll > 0:
-            pct = int(scroll / max_scroll * 100)
-            scroll_pct = f" [{pct}%]"
-
+        # Status bar
+        scroll_pct = f" {int(scroll / max_scroll * 100)}%%" if max_scroll > 0 else ""
         if page == "receipt":
-            status = f" q:quit | arrows:scroll/rotate | r m t s{scroll_pct} "
+            status = f" [r]oast [m]onthly [h]eatmap [t]op [s]nap [<>]rotate{scroll_pct} [q]uit "
+        elif page == "roast":
+            status = f" [<>]rotate [b]ack [q]uit "
         else:
-            status = f" q:quit | b:back | arrows:scroll{scroll_pct} "
+            status = f" [b]ack [q]uit{scroll_pct} "
         try:
             stdscr.addnstr(h - 1, 0, status.ljust(w)[:w-1], w - 1, curses.A_REVERSE)
         except curses.error:
             pass
 
-        stdscr.refresh()
+        stdscr.noutrefresh()
+        curses.doupdate()
         key = stdscr.getch()
 
-        # ── Mouse events ──
+        # Mouse
         if key == curses.KEY_MOUSE:
             try:
                 _, mx, my, _, bstate = curses.getmouse()
-                # Scroll wheel
-                if bstate & curses.BUTTON4_PRESSED:  # scroll up
+                if bstate & curses.BUTTON4_PRESSED:
                     scroll = max(0, scroll - 3)
-                elif bstate & 0x200000:  # BUTTON5_PRESSED / scroll down
+                elif bstate & 0x200000:
                     scroll = min(max_scroll, scroll + 3)
-                # Click on status bar
-                elif my == h - 1 and (bstate & curses.BUTTON1_CLICKED
-                                      or bstate & curses.BUTTON1_PRESSED):
-                    bar_text = status.lower()
+                elif my == h - 1 and (bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED)):
                     if page == "receipt":
-                        # Detect which button was clicked by x position
-                        for label, action, _ in RECEIPT_BUTTONS:
-                            pos = bar_text.find(label[0])
-                            if pos >= 0 and pos - 2 <= mx <= pos + len(label) + 2:
-                                if action == "roast":
-                                    page = "roast"; scroll = 0
-                                elif action == "monthly":
-                                    page = "monthly"; scroll = 0
-                                elif action == "top":
-                                    page = "top"; scroll = 0
-                                elif action == "snap":
-                                    key = ord("s")  # fall through to snap handler
-                                elif action == "prev":
-                                    conv_idx = (conv_idx - 1) % len(CONVERSIONS)
-                                elif action == "next":
-                                    conv_idx = (conv_idx + 1) % len(CONVERSIONS)
-                                break
-                    elif "b:back" in bar_text:
-                        pos = bar_text.find("b")
-                        if pos >= 0 and pos - 2 <= mx <= pos + 8:
+                        if _click_in(status, "[r]oast", mx):
+                            page = "roast"; scroll = 0
+                        elif _click_in(status, "[m]onthly", mx):
+                            page = "monthly"; scroll = 0
+                        elif _click_in(status, "[h]eatmap", mx):
+                            page = "heatmap"; scroll = 0
+                        elif _click_in(status, "[t]op", mx):
+                            page = "top"; scroll = 0
+                        elif _click_in(status, "[s]nap", mx):
+                            key = ord("s")
+                        elif _click_in(status, "[<>]rotate", mx):
+                            conv_idx = (conv_idx + 1) % len(CONVERSIONS)
+                    elif page == "roast":
+                        if _click_in(status, "[<>]rotate", mx):
+                            roast_idx = (roast_idx + 1) % len(all_roasts)
+                        elif _click_in(status, "[b]ack", mx):
+                            page = "receipt"; scroll = 0
+                    else:
+                        if _click_in(status, "[b]ack", mx):
                             page = "receipt"; scroll = 0
             except curses.error:
                 pass
             if key == curses.KEY_MOUSE:
                 continue
 
-        # ── Keyboard events ──
-        if key == ord("q") or key == ord("Q"):
+        # Keyboard
+        if key in (ord("q"), ord("Q")):
             break
         elif key == ord("r") and page == "receipt":
             page = "roast"; scroll = 0
         elif key == ord("m") and page == "receipt":
             page = "monthly"; scroll = 0
+        elif key == ord("h") and page == "receipt":
+            page = "heatmap"; scroll = 0
         elif key == ord("t") and page == "receipt":
             page = "top"; scroll = 0
         elif key == ord("s") and page == "receipt":
-            snap = render_snap(user, days, stats, nrg, costs, roasts, conv_idx)
+            snap = render_snap(user, days, stats, nrg, costs, all_roasts, conv_idx)
             snap_path = os.path.join(home_dir, f"slurm_receipt_{days}d.txt")
             with open(snap_path, "w") as f:
                 f.write(snap)
-            # Copy to clipboard via OSC 52 (works over SSH)
+            copied = False
             try:
                 _osc52_copy(snap)
-                msg = f" Saved + copied to clipboard! {snap_path} "
+                copied = True
             except Exception:
-                msg = f" Saved: {snap_path} "
+                pass
+            msg = f" Saved{' + copied!' if copied else ':'} ~/{os.path.basename(snap_path)} "
             try:
-                row_mid = h // 2
-                col_mid = max(0, (w - len(msg)) // 2)
-                stdscr.addnstr(row_mid, col_mid, msg, w - 1, curses.A_REVERSE | curses.A_BOLD)
+                stdscr.addnstr(h // 2, max(0, (w - len(msg)) // 2),
+                               msg, w - 1, curses.A_REVERSE | curses.A_BOLD)
                 stdscr.refresh()
                 curses.napms(1800)
             except curses.error:
@@ -502,9 +612,15 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts):
         elif key == ord("b") and page != "receipt":
             page = "receipt"; scroll = 0
         elif key in (curses.KEY_RIGHT, ord(">"), ord(".")):
-            conv_idx = (conv_idx + 1) % len(CONVERSIONS)
+            if page == "receipt":
+                conv_idx = (conv_idx + 1) % len(CONVERSIONS)
+            elif page == "roast":
+                roast_idx = (roast_idx + 1) % len(all_roasts)
         elif key in (curses.KEY_LEFT, ord("<"), ord(",")):
-            conv_idx = (conv_idx - 1) % len(CONVERSIONS)
+            if page == "receipt":
+                conv_idx = (conv_idx - 1) % len(CONVERSIONS)
+            elif page == "roast":
+                roast_idx = (roast_idx - 1) % len(all_roasts)
         elif key in (curses.KEY_DOWN, ord("j")):
             scroll += 1
         elif key in (curses.KEY_UP, ord("k")):
@@ -514,5 +630,8 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts):
         elif key == curses.KEY_PPAGE:
             scroll = max(0, scroll - h // 2)
 
-    # Disable mouse tracking on exit
-    print("\033[?1003l", end="", flush=True)
+
+def _click_in(bar_text, label, mx):
+    """Check if mouse x position hits a status bar label."""
+    pos = bar_text.find(label)
+    return pos >= 0 and pos <= mx <= pos + len(label)

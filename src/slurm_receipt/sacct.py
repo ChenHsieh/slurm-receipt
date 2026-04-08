@@ -202,6 +202,9 @@ def compute_stats(jobs):
         busiest = max(submissions_per_day.items(), key=lambda x: x[1])
         s["busiest_day"] = {"date": busiest[0], "count": busiest[1]}
 
+    # Daily activity for heatmap
+    s["daily"] = dict(submissions_per_day)
+
     # Convert defaultdicts for cleanliness
     s["gpu_hours_by_type"] = dict(s["gpu_hours_by_type"])
     s["partitions"] = dict(s["partitions"])
