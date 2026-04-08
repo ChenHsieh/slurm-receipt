@@ -3,6 +3,7 @@
 import base64
 import curses
 import os
+import subprocess
 import sys
 import random
 from datetime import datetime, timedelta
@@ -12,13 +13,65 @@ from slurm_receipt.roast import generate_roasts
 
 
 def _osc52_copy(text):
-    """Copy to clipboard via OSC 52, with tmux passthrough support."""
+    """Copy to clipboard via OSC 52. Writes to /dev/tty to bypass curses."""
     encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
     if os.environ.get("TMUX"):
-        sys.stdout.write(f"\033Ptmux;\033\033]52;c;{encoded}\a\033\\")
+        seq = f"\033Ptmux;\033\033]52;c;{encoded}\a\033\\"
     else:
-        sys.stdout.write(f"\033]52;c;{encoded}\a")
-    sys.stdout.flush()
+        seq = f"\033]52;c;{encoded}\a"
+    # Write directly to /dev/tty so the escape reaches the outer terminal
+    # even when inside curses or tmux
+    try:
+        fd = os.open("/dev/tty", os.O_WRONLY | os.O_NOCTTY)
+        os.write(fd, seq.encode("ascii"))
+        os.close(fd)
+    except OSError:
+        sys.stdout.write(seq)
+        sys.stdout.flush()
+
+
+def _tmux_buffer_copy(text):
+    """Copy to tmux paste buffer. User can paste with prefix+]."""
+    try:
+        p = subprocess.Popen(
+            ["tmux", "load-buffer", "-"],
+            stdin=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        p.communicate(text.encode("utf-8"), timeout=3)
+        return p.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def _clipboard_copy(text):
+    """Try multiple clipboard methods. Returns description of what worked."""
+    # Try OSC 52 to /dev/tty (works over SSH if terminal supports it)
+    try:
+        _osc52_copy(text)
+        # OSC 52 is fire-and-forget; we can't tell if it actually worked.
+        # If in tmux, also load into tmux buffer as a reliable fallback.
+        if os.environ.get("TMUX"):
+            _tmux_buffer_copy(text)
+            return "tmux buffer (prefix+])"
+        return "clipboard (OSC 52)"
+    except Exception:
+        pass
+    # Fallback: tmux paste buffer
+    if os.environ.get("TMUX") and _tmux_buffer_copy(text):
+        return "tmux buffer (prefix+])"
+    # Fallback: xclip, xsel, wl-copy
+    for cmd in [["xclip", "-selection", "clipboard"],
+                ["xsel", "--clipboard", "--input"],
+                ["wl-copy"]]:
+        try:
+            p = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL)
+            p.communicate(text.encode("utf-8"), timeout=3)
+            if p.returncode == 0:
+                return "clipboard"
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+    return ""
 
 
 W = 52  # receipt inner width
@@ -69,9 +122,19 @@ def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
     lines = []
     a = lines.append
 
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    start_str = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
     mascot = get_mascot(stats["total_cpu_hours"], user)
+
+    # Show actual data range instead of query range
+    first = stats.get("first_submit")
+    last = stats.get("last_submit")
+    if first and last:
+        start_str = first.strftime("%Y-%m-%d")
+        end_str = last.strftime("%Y-%m-%d %H:%M")
+        actual_days = (last - first).days + 1
+    else:
+        start_str = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        end_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        actual_days = days
 
     a(("=" * W, "dim"))
     a(("", "normal"))
@@ -81,8 +144,8 @@ def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
     a(("=" * W, "dim"))
     a(("", "normal"))
     a((f"  Customer:  {user}", "normal"))
-    a((f"  Period:    {start_str} -> {now_str}", "normal"))
-    a((f"  Days:      {days}", "normal"))
+    a((f"  Period:    {start_str} -> {end_str}", "normal"))
+    a((f"  Days:      {actual_days}", "normal"))
     a(("", "normal"))
 
     # Order summary
@@ -172,115 +235,135 @@ def build_receipt_page(user, days, stats, nrg, costs, conv_idx):
     return lines
 
 
-def build_heatmap_page(stats, days):
-    """GitHub-style contribution heatmap for job submissions."""
+def build_heatmap_page(stats, days, term_width=None):
+    """Verbal activity report: weekly bars, day-of-week pattern, hour pattern."""
     lines = []
     a = lines.append
     daily = stats.get("daily", {})
 
     a(("=" * W, "dim"))
-    a((_ctr("ACTIVITY HEATMAP"), "title"))
+    a((_ctr("ACTIVITY REPORT"), "title"))
     a(("=" * W, "dim"))
     a(("", "normal"))
 
     if not daily:
-        a((_ctr("No daily data available."), "dim"))
+        a((_ctr("No activity data available."), "dim"))
         return lines
 
-    # Determine date range
     end = datetime.now()
     start = end - timedelta(days=min(days, 365))
 
-    # Build a grid: columns = weeks, rows = weekdays (Mon-Sun)
-    # Each cell = one day, intensity based on job count
-    DOTS = [" ", ".", "o", "O", "#"]  # intensity levels
+    # ── Weekly breakdown with bars ───────────────────────────────────
 
-    # Find max for scaling
-    max_count = max(daily.values()) if daily else 1
-    if max_count == 0:
-        max_count = 1
+    a((_ctr("WEEKLY BREAKDOWN"), "heading"))
+    a(("  " + "-" * (W - 4), "dim"))
 
-    def _intensity(count):
-        if count == 0:
-            return 0
-        pct = count / max_count
-        if pct < 0.15:
-            return 1
-        elif pct < 0.40:
-            return 2
-        elif pct < 0.70:
-            return 3
-        else:
-            return 4
-
-    # Generate weeks from start to end
-    # Align start to a Monday
-    cur = start - timedelta(days=start.weekday())
+    # Bucket daily counts into weeks
+    cur = start - timedelta(days=start.weekday())  # align to Monday
     weeks = []
     while cur <= end:
-        week = []
-        for dow in range(7):
-            d = cur + timedelta(days=dow)
-            key = d.strftime("%Y-%m-%d")
-            count = daily.get(key, 0)
-            in_range = start <= d <= end
-            week.append((d, count, in_range))
-        weeks.append(week)
+        week_end = cur + timedelta(days=6)
+        count = 0
+        for i in range(7):
+            d = cur + timedelta(days=i)
+            if start <= d <= end:
+                count += daily.get(d.strftime("%Y-%m-%d"), 0)
+        label = f"{cur.strftime('%b %d')}-{week_end.strftime('%d')}"
+        weeks.append((label, count))
         cur += timedelta(days=7)
 
-    # Limit to fit in receipt width (~48 usable chars)
-    # Each week = 1 char + 1 space, so ~24 weeks visible
-    max_weeks = (W - 6) // 2  # leave room for day labels
-    if len(weeks) > max_weeks:
-        weeks = weeks[-max_weeks:]
-
-    # Month labels across the top
-    month_row = "     "
-    prev_month = ""
-    for wi, week in enumerate(weeks):
-        # Use the Monday of each week for month label
-        m = week[0][0].strftime("%b")
-        if m != prev_month:
-            month_row += m[0]
-            prev_month = m
-        else:
-            month_row += " "
-        month_row += " "
-    a((month_row[:W], "dim"))
-
-    # Day rows: Mon, Wed, Fri shown, others just dots
-    day_labels = ["M", " ", "W", " ", "F", " ", "S"]
-    for dow in range(7):
-        row = f"  {day_labels[dow]}  "
-        for week in weeks:
-            d, count, in_range = week[dow]
-            if not in_range:
-                row += "  "
-            else:
-                dot = DOTS[_intensity(count)]
-                row += dot + " "
-        a((row[:W], "bar" if dow < 5 else "dim"))
+    max_week = max((c for _, c in weeks), default=1) or 1
+    bar_w = 20
+    for label, count in weeks:
+        n = int(count / max_week * bar_w)
+        bar = "#" * n + "." * (bar_w - n)
+        peak = " <-" if count == max_week and count > 0 else ""
+        a((f"  {label:>12}  [{bar}] {count:>5}{peak}", "bar"))
 
     a(("", "normal"))
 
-    # Legend
-    legend = "  Less " + " ".join(DOTS) + " More"
-    a((legend, "dim"))
+    # ── Day-of-week pattern (aggregate) ──────────────────────────────
+
+    a((_ctr("DAY OF WEEK"), "heading"))
+    a(("  " + "-" * (W - 4), "dim"))
+
+    by_dow = stats.get("submissions_by_dow", {})
+    day_names = ["Monday", "Tuesday", "Wednesday", "Thursday",
+                 "Friday", "Saturday", "Sunday"]
+    max_dow = max(by_dow.values()) if by_dow else 1
+    max_dow = max_dow or 1
+    bar_w = 18
+
+    for i, name in enumerate(day_names):
+        count = by_dow.get(i, 0)
+        n = int(count / max_dow * bar_w) if max_dow else 0
+        bar = "#" * n + "." * (bar_w - n)
+        peak = " <-" if count == max_dow and count > 0 else ""
+        attr = "dim" if i >= 5 else "bar"
+        a((f"  {name:<11} [{bar}] {count:>5}{peak}", attr))
+
     a(("", "normal"))
 
-    # Summary stats
-    total_days = len(daily)
+    # ── Hour-of-day pattern ──────────────────────────────────────────
+
+    by_hour = stats.get("submissions_by_hour", {})
+    if by_hour:
+        a((_ctr("TIME OF DAY"), "heading"))
+        a(("  " + "-" * (W - 4), "dim"))
+
+        max_hr = max(by_hour.values()) if by_hour else 1
+        max_hr = max_hr or 1
+
+        # Compact: show 4-hour buckets
+        buckets = [
+            ("12am-4am",  range(0, 4)),
+            (" 4am-8am",  range(4, 8)),
+            (" 8am-12pm", range(8, 12)),
+            ("12pm-4pm",  range(12, 16)),
+            (" 4pm-8pm",  range(16, 20)),
+            (" 8pm-12am", range(20, 24)),
+        ]
+        bucket_counts = []
+        for label, hrs in buckets:
+            c = sum(by_hour.get(h, 0) for h in hrs)
+            bucket_counts.append((label, c))
+
+        max_bucket = max(c for _, c in bucket_counts) or 1
+        bar_w = 20
+        for label, count in bucket_counts:
+            n = int(count / max_bucket * bar_w)
+            bar = "#" * n + "." * (bar_w - n)
+            is_night = label.startswith("12am") or label.startswith(" 8pm")
+            attr = "dim" if is_night else "bar"
+            a((f"  {label:>10}  [{bar}] {count:>5}", attr))
+
+        a(("", "normal"))
+
+    # ── Summary stats ────────────────────────────────────────────────
+
+    a(("-" * W, "dim"))
+    a((_ctr("STATS"), "heading"))
+    a(("-" * W, "dim"))
+
+    total_days_in_range = (end - start).days + 1
     active_days = sum(1 for v in daily.values() if v > 0)
-    if total_days > 0:
-        a((_right("  Active days", f"{active_days}/{total_days}"), "normal"))
-        streak = _longest_streak(daily, start, end)
-        if streak > 1:
-            a((_right("  Longest streak", f"{streak} days"), "highlight"))
+    streak = _longest_streak(daily, start, end)
 
-    # Busiest day callout
+    a((_right("  Active days", f"{active_days}/{total_days_in_range}"), "normal"))
+    if streak > 1:
+        a((_right("  Longest streak", f"{streak} days"), "highlight"))
+
     if daily:
         peak_day = max(daily.items(), key=lambda x: x[1])
         a((_right("  Peak day", f"{peak_day[0]} ({peak_day[1]:,})"), "highlight"))
+
+        quietest = min(((k, v) for k, v in daily.items() if v > 0), key=lambda x: x[1])
+        a((_right("  Quietest active day", f"{quietest[0]} ({quietest[1]})"), "dim"))
+
+    total_submissions = sum(daily.values())
+    if active_days > 0:
+        avg = total_submissions / active_days
+        a((_right("  Avg jobs/active day", f"{avg:.1f}"), "normal"))
 
     a(("", "normal"))
     return lines
@@ -349,7 +432,7 @@ def build_monthly_page(stats):
 
 
 def build_roast_page(roasts, roast_idx):
-    """Roast page -- shows one roast at a time, rotatable."""
+    """Roast page -- shows one roast at a time with mini job receipt."""
     lines = []
     a = lines.append
 
@@ -363,9 +446,35 @@ def build_roast_page(roasts, roast_idx):
     if roasts:
         idx = roast_idx % len(roasts)
         roast = roasts[idx]
-        for rline in roast.split("\n"):
+        # Support both old str format and new dict format
+        if isinstance(roast, dict):
+            text = roast["text"]
+            ctx = roast.get("context")
+        else:
+            text = roast
+            ctx = None
+
+        for rline in text.split("\n"):
             a((rline, "roast"))
+
         a(("", "normal"))
+
+        # Mini POS receipt panel for job context
+        if ctx:
+            a(("  " + "~" * (W - 4), "dim"))
+            a(("  | RELATED JOB INFO" + " " * (W - 23) + " |", "dim"))
+            a(("  |" + "-" * (W - 6) + "|", "dim"))
+            if ctx.get("job_id"):
+                jid = ctx["job_id"]
+                a((f"  |  Job ID:  {jid:<{W-18}}|", "dim"))
+            if ctx.get("name"):
+                nm = ctx["name"]
+                a((f"  |  Name:    {nm:<{W-18}}|", "dim"))
+            if ctx.get("detail"):
+                dt = ctx["detail"]
+                a((f"  |  Detail:  {dt:<{W-18}}|", "dim"))
+            a(("  " + "~" * (W - 4), "dim"))
+
         a(("", "normal"))
         a((_ctr(f"[{idx + 1}/{len(roasts)}]"), "dim"))
     else:
@@ -432,7 +541,8 @@ def render_snap(user, days, stats, nrg, costs, roasts, conv_idx=0):
         out.append(_ctr("P.S. from the cluster:"))
         out.append("-" * W)
         roast = random.choice(roasts)
-        for line in roast.split("\n"):
+        text = roast["text"] if isinstance(roast, dict) else roast
+        for line in text.split("\n"):
             out.append(line)
         out.append("")
 
@@ -447,10 +557,26 @@ def render_snap(user, days, stats, nrg, costs, roasts, conv_idx=0):
 
 def run_tui(user, days, stats, nrg, costs, roasts):
     """Launch interactive curses TUI."""
-    curses.wrapper(_tui_main, user, days, stats, nrg, costs, roasts)
+    snap_path = os.path.join(os.path.expanduser("~"), f"slurm_receipt_{days}d.txt")
+
+    # Auto-save on entry (graceful if home is not writable)
+    try:
+        snap = render_snap(user, days, stats, nrg, costs, roasts)
+        with open(snap_path, "w") as f:
+            f.write(snap)
+    except OSError:
+        snap_path = None  # can't write, skip save
+
+    curses.wrapper(_tui_main, user, days, stats, nrg, costs, roasts, snap_path)
+
+    # After TUI exits, print where the receipt was saved
+    if snap_path:
+        sys.stderr.write(f"\n  Receipt saved to: {snap_path}\n\n")
+    else:
+        sys.stderr.write("\n")
 
 
-def _tui_main(stdscr, user, days, stats, nrg, costs, roasts):
+def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
     curses.curs_set(0)
     curses.start_color()
     curses.use_default_colors()
@@ -490,7 +616,13 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts):
     all_roasts = list(roasts)
     for _ in range(4):
         for r in generate_roasts(stats):
-            if r not in all_roasts:
+            # Deduplicate by text
+            r_text = r["text"] if isinstance(r, dict) else r
+            existing = [
+                (x["text"] if isinstance(x, dict) else x)
+                for x in all_roasts
+            ]
+            if r_text not in existing:
                 all_roasts.append(r)
 
     while True:
@@ -591,16 +723,23 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts):
             page = "top"; scroll = 0
         elif key == ord("s") and page == "receipt":
             snap = render_snap(user, days, stats, nrg, costs, all_roasts, conv_idx)
-            snap_path = os.path.join(home_dir, f"slurm_receipt_{days}d.txt")
-            with open(snap_path, "w") as f:
-                f.write(snap)
-            copied = False
-            try:
-                _osc52_copy(snap)
-                copied = True
-            except Exception:
-                pass
-            msg = f" Saved{' + copied!' if copied else ':'} ~/{os.path.basename(snap_path)} "
+            saved = False
+            if snap_path:
+                try:
+                    with open(snap_path, "w") as f:
+                        f.write(snap)
+                    saved = True
+                except OSError:
+                    pass
+            clip_method = _clipboard_copy(snap)
+            if saved and clip_method:
+                msg = f" Saved + copied ({clip_method})! "
+            elif saved:
+                msg = f" Saved: ~/{os.path.basename(snap_path)} "
+            elif clip_method:
+                msg = f" Copied ({clip_method})! "
+            else:
+                msg = " Could not save or copy. "
             try:
                 stdscr.addnstr(h // 2, max(0, (w - len(msg)) // 2),
                                msg, w - 1, curses.A_REVERSE | curses.A_BOLD)

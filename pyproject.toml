@@ -9,7 +9,7 @@ description = "See what your HPC compute really cost -- in dollars, energy, and 
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.8"
-authors = [{ name = "ch29576" }]
+authors = [{ name = "Chen Hsieh" }]
 keywords = ["slurm", "hpc", "receipt", "energy", "cost"]
 classifiers = [
     "Environment :: Console :: Curses",
@@ -25,4 +25,4 @@ slurm-receipt = "slurm_receipt.cli:main"
 packages = ["src/slurm_receipt"]
 
 [project.urls]
-Homepage = "https://github.com/YOUR_USER/slurm-receipt"
+Homepage = "https://github.com/chen-hsieh/slurm-receipt"
