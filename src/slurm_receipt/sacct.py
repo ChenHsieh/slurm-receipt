@@ -245,6 +245,8 @@ def compute_stats(jobs):
     # Track submissions per minute for array burst detection
     submissions_per_minute = defaultdict(int)
     submissions_per_day = defaultdict(int)
+    failed_per_day = defaultdict(int)
+    cpu_hours_per_day = defaultdict(float)
 
     # Cap fastest_fails to avoid unbounded growth
     MAX_FAST_FAILS = 500
@@ -307,6 +309,9 @@ def compute_stats(jobs):
             submissions_per_minute[minute_key] += 1
             day_key = j["submit_dt"].strftime("%Y-%m-%d")
             submissions_per_day[day_key] += 1
+            if state == "FAILED":
+                failed_per_day[day_key] += 1
+            cpu_hours_per_day[day_key] += cpu_hours
 
             # Monthly bucketing
             month_key = j["submit_dt"].strftime("%Y-%m")
@@ -343,8 +348,10 @@ def compute_stats(jobs):
         busiest = max(submissions_per_day.items(), key=lambda x: x[1])
         s["busiest_day"] = {"date": busiest[0], "count": busiest[1]}
 
-    # Daily activity for heatmap
+    # Daily activity for heatmap and line chart
     s["daily"] = dict(submissions_per_day)
+    s["daily_failed"] = dict(failed_per_day)
+    s["daily_cpu_hours"] = dict(cpu_hours_per_day)
 
     # Convert defaultdicts for cleanliness
     s["gpu_hours_by_type"] = dict(s["gpu_hours_by_type"])

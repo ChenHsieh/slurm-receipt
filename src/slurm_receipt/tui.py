@@ -484,6 +484,232 @@ def build_roast_page(roasts, roast_idx):
     return lines
 
 
+BLOCKS = " ▁▂▃▄▅▆▇█"  # 9 levels: 0 = empty, 8 = full
+
+
+def _moving_avg(values, window=7):
+    """Compute simple moving average, returning same-length list (None-padded at start)."""
+    result = []
+    for i in range(len(values)):
+        if i < window - 1:
+            result.append(None)
+        else:
+            result.append(sum(values[i - window + 1:i + 1]) / window)
+    return result
+
+
+def _sparkline(values, width, max_val):
+    """Render a list of values as a sparkline string using block characters."""
+    if max_val <= 0:
+        return " " * width
+    chars = []
+    for v in values:
+        if v is None:
+            chars.append(" ")
+        else:
+            level = int(min(v / max_val, 1.0) * 8)
+            chars.append(BLOCKS[level])
+    return "".join(chars)
+
+
+# Line chart overlay layers
+LINE_LAYERS = [
+    {"key": "daily", "label": "Jobs submitted", "unit": "jobs"},
+    {"key": "daily_failed", "label": "Failed jobs", "unit": "fails"},
+    {"key": "daily_cpu_hours", "label": "CPU hours", "unit": "cpu-hrs"},
+]
+
+
+def build_linechart_page(stats, days, layer_idx=0):
+    """ASCII line chart of daily activity with switchable overlay layers."""
+    lines = []
+    a = lines.append
+
+    layer = LINE_LAYERS[layer_idx % len(LINE_LAYERS)]
+    daily_data = stats.get(layer["key"], {})
+
+    a(("=" * W, "dim"))
+    a((_ctr("TREND LINE"), "title"))
+    a(("=" * W, "dim"))
+    a(("", "normal"))
+
+    # Layer selector
+    parts = []
+    for i, ly in enumerate(LINE_LAYERS):
+        if i == layer_idx % len(LINE_LAYERS):
+            parts.append(f"[{ly['label']}]")
+        else:
+            parts.append(f" {ly['label']} ")
+    a((_ctr("  ".join(parts)), "heading"))
+    a((_ctr("tab to switch layer"), "dim"))
+    a(("", "normal"))
+
+    if not stats.get("daily", {}):
+        a((_ctr("No activity data available."), "dim"))
+        return lines
+
+    # Build date range
+    end = datetime.now()
+    start = end - timedelta(days=min(days, 365))
+
+    # Collect values for each day in range
+    date_list = []
+    values = []
+    cur = start
+    while cur <= end:
+        key = cur.strftime("%Y-%m-%d")
+        date_list.append(cur)
+        values.append(daily_data.get(key, 0))
+        cur += timedelta(days=1)
+
+    if not values:
+        a((_ctr("No data in range."), "dim"))
+        return lines
+
+    max_val = max(values) if values else 1
+    max_val = max_val or 1
+    avg = _moving_avg(values, window=7)
+    max_avg = max((v for v in avg if v is not None), default=1) or 1
+    # Use the same scale for both raw and moving average
+    scale_max = max(max_val, max_avg)
+
+    # ── Vertical chart (rows = value levels, cols = days) ────────
+    # Show a chart that's W-8 columns wide; if more days, bucket them
+    chart_w = W - 8  # leave room for y-axis labels
+    n_days = len(values)
+
+    if n_days <= chart_w:
+        # One column per day
+        plot_vals = values
+        plot_avg = avg
+        plot_dates = date_list
+    else:
+        # Bucket days into chart_w bins
+        bucket_size = n_days / chart_w
+        plot_vals = []
+        plot_avg = []
+        plot_dates = []
+        for i in range(chart_w):
+            lo = int(i * bucket_size)
+            hi = int((i + 1) * bucket_size)
+            bucket = values[lo:hi]
+            plot_vals.append(sum(bucket) / len(bucket) if bucket else 0)
+            avg_bucket = [v for v in avg[lo:hi] if v is not None]
+            plot_avg.append(sum(avg_bucket) / len(avg_bucket) if avg_bucket else None)
+            plot_dates.append(date_list[lo])
+
+    # ── Row-based vertical chart ─────────────────────────────────
+    chart_h = 10  # number of rows
+    a(("-" * W, "dim"))
+
+    # Y-axis labels at top, middle, bottom
+    for row in range(chart_h, 0, -1):
+        threshold = (row / chart_h) * scale_max
+        row_chars = []
+        for i, v in enumerate(plot_vals):
+            val_level = v / scale_max * chart_h if scale_max else 0
+            if val_level >= row:
+                row_chars.append("█")
+            elif val_level >= row - 0.5:
+                row_chars.append("▄")
+            else:
+                # Check if moving average crosses this row
+                ma = plot_avg[i] if i < len(plot_avg) else None
+                if ma is not None:
+                    ma_level = ma / scale_max * chart_h
+                    if abs(ma_level - row + 0.5) < 0.6:
+                        row_chars.append("─")
+                    else:
+                        row_chars.append(" ")
+                else:
+                    row_chars.append(" ")
+
+        bar_str = "".join(row_chars)
+        if row == chart_h:
+            label = f"{_fmt(scale_max):>5}"
+        elif row == chart_h // 2:
+            label = f"{_fmt(scale_max / 2):>5}"
+        elif row == 1:
+            label = "    0"
+        else:
+            label = "     "
+        a((f"{label} │{bar_str}", "bar"))
+
+    # X-axis
+    x_axis = "─" * len(plot_vals)
+    a((f"      └{x_axis}", "dim"))
+
+    # Date markers on x-axis
+    if plot_dates:
+        # Place month markers
+        last_month = None
+        month_labels = []
+        for i, d in enumerate(plot_dates):
+            m = d.strftime("%b")
+            if m != last_month:
+                month_labels.append((i, m))
+                last_month = m
+        # Render month labels (avoid overlap)
+        label_row = list(" " * len(plot_dates))
+        for pos, lbl in month_labels:
+            if pos + len(lbl) <= len(label_row):
+                for ci, ch in enumerate(lbl):
+                    label_row[pos + ci] = ch
+        a((f"       {''.join(label_row)}", "dim"))
+
+    a(("", "normal"))
+
+    # ── Sparkline (compact single-row view) ──────────────────────
+    a((_ctr("SPARKLINE"), "heading"))
+    a(("  " + "-" * (W - 4), "dim"))
+
+    spark = _sparkline(plot_vals, len(plot_vals), scale_max)
+    a((f"  raw: {spark}", "bar"))
+
+    avg_spark = _sparkline(plot_avg, len(plot_avg), scale_max)
+    a((f"  7d~: {avg_spark}", "highlight"))
+
+    a(("", "normal"))
+
+    # ── Summary stats ────────────────────────────────────────────
+    a(("-" * W, "dim"))
+    a((_ctr("TREND STATS"), "heading"))
+    a(("-" * W, "dim"))
+
+    total = sum(values)
+    active_days = sum(1 for v in values if v > 0)
+    peak_val = max(values) if values else 0
+    peak_idx = values.index(peak_val) if peak_val > 0 else 0
+    peak_date = date_list[peak_idx].strftime("%Y-%m-%d") if date_list else "N/A"
+
+    a((_right(f"  Total {layer['unit']}", f"{_fmt(total)}"), "normal"))
+    a((_right("  Active days", f"{active_days}/{len(values)}"), "normal"))
+    a((_right("  Peak", f"{_fmt(peak_val)} on {peak_date}"), "highlight"))
+
+    if active_days > 0:
+        avg_active = total / active_days
+        a((_right(f"  Avg/active day", f"{_fmt(avg_active)} {layer['unit']}"), "normal"))
+
+    # Trend direction: compare first half avg to second half avg
+    mid = len(values) // 2
+    if mid > 0:
+        first_half = sum(values[:mid]) / mid
+        second_half = sum(values[mid:]) / max(len(values) - mid, 1)
+        if first_half > 0:
+            change_pct = ((second_half - first_half) / first_half) * 100
+            if change_pct > 10:
+                a((_right("  Trend", f"↑ +{change_pct:.0f}%"), "highlight"))
+            elif change_pct < -10:
+                a((_right("  Trend", f"↓ {change_pct:.0f}%"), "dim"))
+            else:
+                a((_right("  Trend", "→ stable"), "normal"))
+
+    a(("", "normal"))
+    a((_ctr("█ raw data   ─ 7-day avg"), "dim"))
+    a(("", "normal"))
+
+    return lines
+
 def build_top_jobs_page(stats):
     """Top jobs and failure hall of shame."""
     lines = []
@@ -608,6 +834,7 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
 
     conv_idx = 0
     roast_idx = 0
+    layer_idx = 0
     page = "receipt"
     scroll = 0
     home_dir = os.path.expanduser("~")
@@ -634,6 +861,8 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
             content = build_receipt_page(user, days, stats, nrg, costs, conv_idx)
         elif page == "heatmap":
             content = build_heatmap_page(stats, days)
+        elif page == "line":
+            content = build_linechart_page(stats, days, layer_idx)
         elif page == "monthly":
             content = build_monthly_page(stats)
         elif page == "roast":
@@ -661,9 +890,11 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
         # Status bar
         scroll_pct = f" {int(scroll / max_scroll * 100)}%%" if max_scroll > 0 else ""
         if page == "receipt":
-            status = f" [r]oast [m]onthly [h]eatmap [t]op [s]nap [<>]rotate{scroll_pct} [q]uit "
+            status = f" [r]oast [m]onthly [h]eatmap [l]ine [t]op [s]nap [<>]rotate{scroll_pct} [q]uit "
         elif page == "roast":
             status = f" [<>]rotate [b]ack [q]uit "
+        elif page == "line":
+            status = f" [tab]layer [b]ack [q]uit{scroll_pct} "
         else:
             status = f" [b]ack [q]uit{scroll_pct} "
         try:
@@ -691,6 +922,8 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
                             page = "monthly"; scroll = 0
                         elif _click_in(status, "[h]eatmap", mx):
                             page = "heatmap"; scroll = 0
+                        elif _click_in(status, "[l]ine", mx):
+                            page = "line"; scroll = 0
                         elif _click_in(status, "[t]op", mx):
                             page = "top"; scroll = 0
                         elif _click_in(status, "[s]nap", mx):
@@ -700,6 +933,11 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
                     elif page == "roast":
                         if _click_in(status, "[<>]rotate", mx):
                             roast_idx = (roast_idx + 1) % len(all_roasts)
+                        elif _click_in(status, "[b]ack", mx):
+                            page = "receipt"; scroll = 0
+                    elif page == "line":
+                        if _click_in(status, "[tab]layer", mx):
+                            layer_idx = (layer_idx + 1) % len(LINE_LAYERS)
                         elif _click_in(status, "[b]ack", mx):
                             page = "receipt"; scroll = 0
                     else:
@@ -719,6 +957,10 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
             page = "monthly"; scroll = 0
         elif key == ord("h") and page == "receipt":
             page = "heatmap"; scroll = 0
+        elif key == ord("l") and page == "receipt":
+            page = "line"; scroll = 0
+        elif key == ord("\t") and page == "line":
+            layer_idx = (layer_idx + 1) % len(LINE_LAYERS)
         elif key == ord("t") and page == "receipt":
             page = "top"; scroll = 0
         elif key == ord("s") and page == "receipt":
