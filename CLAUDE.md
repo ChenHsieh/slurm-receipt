@@ -17,7 +17,7 @@ job patterns. Think "Spotify Wrapped" for HPC users.
 |------|-------|------|
 | `cli.py` | Entry point. Argparse, pipeline (fetch jobs → fetch fair share → compute → output), threaded loading spinner with fun facts |
 | `sacct.py` | Data layer. Calls `sacct -X --parsable2`, stream-parses output into job dicts, aggregates into stats dict. Also has `generate_demo_jobs()` for `--demo` mode |
-| `fairshare.py` | Priority data layer. Calls `sshare`/`sacctmgr`, scoped to the user's own account only (never an unscoped `sshare -a`). Returns self row + own-account leaderboard. Has `generate_demo_fairshare()` for `--demo` mode |
+| `fairshare.py` | Priority data layer. Calls `sshare`/`sacctmgr`, scoped to the user's own account only by default (never an unscoped `sshare -a` for the leaderboard). Returns self row + own-account leaderboard, plus an opt-in anonymized cluster-wide percentile (`--cluster-rank`). Has `generate_demo_fairshare()`/`generate_demo_cluster_percentile()` for `--demo` mode |
 | `calc.py` | Pure math. Energy (kWh from CPU/GPU TDP), AWS cost estimates, 37 fun conversions (food/energy/transport/etc.), ASCII mascot tiers (6 tiers by CPU-hours) |
 | `roast.py` | Humor engine. ~25 roast triggers across failure rates, night owl patterns, cancellations, GPU usage, etc. Returns `[{"text": str, "context": dict_or_None}]` |
 | `tui.py` | curses TUI. 7 pages (receipt/activity/monthly/roast/line/top/fairshare), keyboard+mouse navigation, clipboard copy (OSC52 → tmux buffer → xclip fallback), auto-save on entry |
@@ -26,7 +26,7 @@ job patterns. Think "Spotify Wrapped" for HPC users.
 ## Data flow
 
 ```
-CLI args (--days, --user, --demo, --uga, --snap)
+CLI args (--days, --user, --demo, --uga, --cluster-rank, --snap)
     │
     ▼
 sacct.fetch_jobs()          ← subprocess.Popen, stream parse, -X flag
@@ -63,6 +63,13 @@ fairshare.fetch_fairshare_data(user)   ← runs alongside the pipeline above, in
     │   where row = {account, user, raw_shares, norm_shares, raw_usage,
     │                effectv_usage, fairshare}
     │ Returns None if sshare/sacctmgr unavailable -- the fairshare page/key is then hidden
+
+fairshare.fetch_cluster_percentile(user)   ← only called if --cluster-rank is passed
+    │ sshare -a -p --format=User,RawUsage   → the one unscoped cluster-wide query in this file
+    │ sums RawUsage per user, ranks caller against everyone, then drops the per-user dict
+    │ returns: {"percentile": float, "total_users": int} or None
+    │   attached to fs_data["cluster"]; build_fairshare_page() renders it as a percentile
+    │   bar only -- no other user's name/account/usage is ever passed to the TUI layer
 ```
 
 ## Key architecture decisions
@@ -156,7 +163,7 @@ per-user consistency. Returns `{"art": [str, ...], "title": str}`.
 | roast | `build_roast_page()` | `r` | One roast at a time, mini POS panel for job context, rotatable with <> |
 | line | `build_linechart_page()` | `l` | Daily trend line chart (block chars ▁▂▃▄▅▆▇█), 7-day moving avg, switchable layers (jobs/fails/cpu-hrs via tab) |
 | top | `build_top_jobs_page()` | `t` | Top 10 CPU hogs, speedrun hall of shame (<10s fails), slow+painful fails |
-| fairshare | `build_fairshare_page()` | `f` (hidden if no fairshare data) | FairShare score + bar, effective usage %, own-account leaderboard ranked by effective usage share |
+| fairshare | `build_fairshare_page()` | `f` (hidden if no fairshare data) | FairShare score + bar, effective usage %, own-account leaderboard ranked by effective usage share, optional anonymized cluster-wide percentile (`--cluster-rank`) |
 
 ## CLI flags
 
@@ -169,17 +176,24 @@ per-user consistency. Returns `{"art": [str, ...], "title": str}`.
 | `--snap-file PATH` | Save to specific path |
 | `--no-copy` | Skip clipboard on --snap |
 | `--uga` | Add UGA Bulldogs themed roasts |
+| `--cluster-rank` | Add anonymized cluster-wide percentile to the fairshare page |
 | `--demo` | Synthetic data, no sacct needed |
 
 ## Known limitations / future work
 
 - No caching — every run re-queries sacct (the `-X` flag helps but large ranges are still slow)
-- Fair share leaderboard is scoped to the user's own Slurm account only, by design — never
-  an unscoped `sshare -a`, which would dump every lab's usage on the cluster. A cluster-wide
-  leaderboard was considered and deliberately not built for this reason.
+- Fair share leaderboard (names + per-account bars) is scoped to the user's own Slurm account
+  only, by design — never an unscoped `sshare -a`, which would dump every lab's usage on the
+  cluster under real names. A cluster-wide *leaderboard* stays out of scope for that reason.
+  What `--cluster-rank` adds instead is a single anonymized percentile (see `fetch_cluster_percentile`
+  in the data flow above) — it does run `sshare -a`, but the per-user breakdown is discarded
+  immediately after computing the caller's own rank, so no other user's identity or usage is
+  ever displayed, stored, or returned from that function.
 - `fairshare.py`'s "RawUsage" is Slurm's internal decayed usage metric, not literal CPU-hours
-  or seconds — the UI intentionally never labels it as a time unit, only shows it via the
-  normalized `EffectvUsage` percentage, which is well-defined (share of account total).
+  or seconds — the UI intentionally never labels it as a time unit. The per-account leaderboard
+  shows it via the normalized `EffectvUsage` percentage (share of account total); the cluster
+  percentile ranks raw `RawUsage` totals directly, since that metric — unlike `EffectvUsage` —
+  is comparable across accounts rather than normalized within one.
 - OSC 52 clipboard is fire-and-forget — can't confirm it worked
 - Color 8 (gray/dim) requires 16-color terminal support
 - No Windows support (curses, /dev/tty, sacct all absent)

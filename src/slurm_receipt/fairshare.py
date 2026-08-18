@@ -1,9 +1,16 @@
 """Fetch and parse Slurm fair-share (priority) data via sshare/sacctmgr.
 
-Scoping is deliberate: we only ever query the current user's own row
-(``sshare -U -u $USER``) and their own account's direct members
-(``sshare -A <account> -a``). We never run an unscoped ``sshare -a``,
-which on a shared cluster dumps every lab's usage tree.
+Scoping is deliberate: by default we only ever query the current user's own
+row (``sshare -U -u $USER``) and their own account's direct members
+(``sshare -A <account> -a``). We never run an unscoped ``sshare -a`` for the
+account leaderboard, which on a shared cluster would dump every lab's usage
+tree under real names.
+
+The one exception is ``fetch_cluster_percentile()``, used only when the user
+opts in with ``--cluster-rank``. It does run an unscoped ``sshare -a``, but
+collapses the result to a single number (the caller's own percentile) before
+returning -- no other user's name, account, or usage value leaves this
+function.
 """
 
 import subprocess
@@ -115,6 +122,58 @@ def fetch_fairshare_data(user):
         "self": self_row,
         "leaderboard": leaderboard,
         "rank": rank,
+    }
+
+
+CLUSTER_FORMAT = "User,RawUsage"
+
+
+def fetch_cluster_percentile(user, timeout=25):
+    """Compute the user's percentile rank for decayed usage across the whole
+    cluster, without exposing any other user's identity or usage.
+
+    RawUsage (unlike EffectvUsage) is an absolute decayed-usage metric, not
+    normalized per-account, so it's the right column to compare across
+    accounts/labs. We sum each user's RawUsage over every account they
+    belong to, rank the caller against that full population, then discard
+    everything except the caller's percentile and the population size.
+
+    Returns {"percentile": float 0-100, "total_users": int}, or None if
+    sshare is unavailable or the user isn't found in the snapshot.
+    """
+    out = _run(["sshare", "-a", "-p", "--noheader", f"--format={CLUSTER_FORMAT}"],
+               timeout=timeout)
+    if not out:
+        return None
+
+    totals = {}
+    for line in out.splitlines():
+        fields = line.rstrip("\n").split("|")
+        if len(fields) < 2:
+            continue
+        uname = fields[0].strip()
+        if not uname:
+            continue
+        totals[uname] = totals.get(uname, 0.0) + _to_float(fields[1])
+
+    if user not in totals or len(totals) < 2:
+        return None
+
+    self_usage = totals[user]
+    at_or_below = sum(1 for v in totals.values() if v <= self_usage)
+    percentile = at_or_below / len(totals) * 100
+    total_users = len(totals)
+    del totals  # nothing past this point should ever see another user's data
+
+    return {"percentile": percentile, "total_users": total_users}
+
+
+def generate_demo_cluster_percentile(user="demo_user"):
+    """Synthetic cluster percentile for --demo mode (no sshare needed)."""
+    import random
+    return {
+        "percentile": round(random.uniform(35.0, 96.0), 1),
+        "total_users": random.randint(600, 2400),
     }
 
 

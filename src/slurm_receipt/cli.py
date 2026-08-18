@@ -13,7 +13,12 @@ from slurm_receipt.sacct import fetch_jobs, compute_stats, generate_demo_jobs
 from slurm_receipt.calc import energy, cloud_cost
 from slurm_receipt.roast import generate_roasts
 from slurm_receipt.tui import run_tui, render_snap
-from slurm_receipt.fairshare import fetch_fairshare_data, generate_demo_fairshare
+from slurm_receipt.fairshare import (
+    fetch_fairshare_data,
+    generate_demo_fairshare,
+    fetch_cluster_percentile,
+    generate_demo_cluster_percentile,
+)
 
 
 # ── Loading animation with live data preview ─────────────────────────
@@ -144,6 +149,10 @@ def main():
                         help="Don't auto-copy to clipboard on snap")
     parser.add_argument("--uga", action="store_true",
                         help="Add UGA/Dawgs flavor to roasts")
+    parser.add_argument("--cluster-rank", action="store_true",
+                        help="Show your anonymized percentile rank across the whole "
+                             "cluster (only your own percentile is shown -- no other "
+                             "user's name, account, or usage)")
     parser.add_argument("--demo", action="store_true",
                         help="Show demo receipt with synthetic data (no sacct needed)")
 
@@ -185,9 +194,14 @@ def main():
     # Phase 1b: Fair share (best-effort -- missing sshare just hides the page)
     if args.demo:
         fs_data = generate_demo_fairshare(user)
+        if args.cluster_rank:
+            fs_data["cluster"] = generate_demo_cluster_percentile(user)
     else:
         loader.start("Checking fair share...")
         fs_data = fetch_fairshare_data(user)
+        if fs_data and args.cluster_rank:
+            loader.detail("cluster-wide percentile...")
+            fs_data["cluster"] = fetch_cluster_percentile(user)
         loader.stop()
 
     # Phase 2: Compute

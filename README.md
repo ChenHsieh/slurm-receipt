@@ -206,6 +206,30 @@ only -- never an unscoped cluster-wide query. If `sshare` isn't
 available (e.g. off-cluster, or in `--demo` mode without Slurm), this
 page and key are simply hidden.
 
+### Cluster standing (opt-in, anonymized)
+
+Add `--cluster-rank` to see how you stack up against the entire
+cluster, not just your lab:
+
+```
+----------------------------------------------------
+                 CLUSTER STANDING
+        anonymized -- no other user's data is shown
+----------------------------------------------------
+
+      Top 12% of 1,842 users cluster-wide
+          [###########################...]
+
+    You've used more compute than 88% of
+    the 1,842 users active on this cluster.
+```
+
+This does run an unscoped `sshare -a` under the hood -- there's no
+other way to rank against the full cluster -- but it's reduced to a
+single percentile before it ever reaches the display. No other
+user's name, account, or usage number is shown or stored. It's off
+by default; you have to ask for it.
+
 ### Top jobs
 
 Press `t` to see your hungriest jobs by CPU-hours, plus the failure
@@ -302,7 +326,7 @@ Your shop mascot changes based on total CPU-hours:
 ```
 usage: slurm-receipt [-h] [--days DAYS] [--user USER] [--start START]
                      [--end END] [--snap] [--snap-file PATH]
-                     [--no-copy] [--uga] [--demo]
+                     [--no-copy] [--uga] [--cluster-rank] [--demo]
 
 See what your HPC compute really cost.
 
@@ -315,6 +339,8 @@ options:
   --snap-file PATH Save receipt to file
   --no-copy        Don't auto-copy to clipboard on snap
   --uga            Add UGA Bulldogs flavor to roasts
+  --cluster-rank   Show your anonymized percentile rank cluster-wide
+                   (only your own percentile -- no other user's data)
   --demo           Demo with synthetic data (no sacct needed)
 ```
 

@@ -711,22 +711,26 @@ def build_linechart_page(stats, days, layer_idx=0):
     return lines
 
 def build_fairshare_page(fs_data, user):
-    """Fair-share / priority standing page, with a lab leaderboard.
+    """Fair-share / priority standing page, with a lab leaderboard and an
+    optional anonymized cluster-wide percentile.
 
     Scoped deliberately to the user's own Slurm account -- see fairshare.py.
+    The cluster percentile (fs_data["cluster"]) is opt-in via --cluster-rank
+    and never carries any other user's name or usage, only the caller's own
+    rank among everyone.
     """
     lines = []
     a = lines.append
 
     a(("=" * W, "dim"))
     a((_ctr("FAIR SHARE"), "title"))
-    a((_ctr("(your standing in the priority queue)"), "dim"))
+    a((_ctr("where you stand in the priority queue"), "dim"))
     a(("=" * W, "dim"))
     a(("", "normal"))
 
     if not fs_data:
-        a((_ctr("Fair share data unavailable."), "dim"))
-        a((_ctr("(sshare/sacctmgr not found, or not on Slurm)"), "dim"))
+        a((_ctr("Fair share data isn't available here."), "dim"))
+        a((_ctr("(sshare/sacctmgr not found, or this isn't a Slurm cluster)"), "dim"))
         a(("", "normal"))
         return lines
 
@@ -753,16 +757,17 @@ def build_fairshare_page(fs_data, user):
         a((_ctr("[" + "#" * bar_n + "." * (30 - bar_n) + "]"), "bar"))
         a(("", "normal"))
         if fs < 0.2:
-            a((_ctr("Low priority. The scheduler remembers"), "roast"))
-            a((_ctr("every core-hour you've ever used."), "roast"))
+            a((_ctr("Low priority: you've used more than your"), "roast"))
+            a((_ctr("share, so others get scheduled ahead of you."), "roast"))
         elif fs < 0.5:
-            a((_ctr("Middling priority. Give or take, you've"), "roast"))
-            a((_ctr("used your fair share."), "roast"))
+            a((_ctr("Middling priority: you've used roughly"), "roast"))
+            a((_ctr("your fair share, give or take."), "roast"))
         else:
-            a((_ctr("High priority. You've been saving up."), "roast"))
+            a((_ctr("High priority: you've used less than your"), "roast"))
+            a((_ctr("share, so you jump the queue when it matters."), "roast"))
         a(("", "normal"))
-        a((_ctr("Closer to 1.0 = higher scheduling priority"), "dim"))
-        a((_ctr("(you've used less than your fair share)"), "dim"))
+        a((_ctr("1.0 = you've barely used your account's time"), "dim"))
+        a((_ctr("0.0 = you've used far more than your share"), "dim"))
     else:
         a((_ctr("No fairshare score yet -- no usage on record."), "dim"))
     a(("", "normal"))
@@ -773,7 +778,7 @@ def build_fairshare_page(fs_data, user):
     if board:
         a(("-" * W, "dim"))
         a((_ctr(f"{account.upper()} LEADERBOARD"), "heading"))
-        a((_ctr("share of account's effective usage"), "dim"))
+        a((_ctr("each member's share of the account's usage"), "dim"))
         a(("-" * W, "dim"))
         a(("", "normal"))
 
@@ -796,8 +801,27 @@ def build_fairshare_page(fs_data, user):
         elif len(board) == 1:
             a((_ctr("You're the only member of this account."), "dim"))
             a((_ctr("Undisputed champion by default."), "dim"))
+        a(("", "normal"))
 
-    a(("", "normal"))
+    cluster = fs_data.get("cluster")
+    if cluster:
+        pct = min(max(cluster["percentile"], 0.0), 100.0)
+        n_users = cluster["total_users"]
+        top_pct = max(100.0 - pct, 0.1)
+
+        a(("-" * W, "dim"))
+        a((_ctr("CLUSTER STANDING"), "heading"))
+        a((_ctr("anonymized -- no other user's data is shown"), "dim"))
+        a(("-" * W, "dim"))
+        a(("", "normal"))
+        a((_ctr(f"Top {top_pct:.0f}% of {n_users:,} users cluster-wide"), "conversion"))
+        bar_n = int(pct / 100 * 30)
+        a((_ctr("[" + "#" * bar_n + "." * (30 - bar_n) + "]"), "bar"))
+        a(("", "normal"))
+        a((_ctr(f"You've used more compute than {pct:.0f}% of"), "dim"))
+        a((_ctr(f"the {n_users:,} users active on this cluster."), "dim"))
+        a(("", "normal"))
+
     return lines
 
 
