@@ -168,6 +168,44 @@ referenced job info:
                         [1/6]
 ```
 
+### Fair share
+
+Press `f` (when available) to see your Slurm priority standing and how
+your usage compares to the rest of your lab account:
+
+```
+====================================================
+                     FAIR SHARE
+       (your standing in the priority queue)
+====================================================
+
+  Account:  cjtlab
+  Rank:     #1 of 7 in cjtlab
+
+----------------------------------------------------
+                   PRIORITY SCORE
+----------------------------------------------------
+
+                 FairShare: 0.2109
+          [######........................]
+
+  Effective usage .................. 92.6% of cjtlab
+
+----------------------------------------------------
+                 CJTLAB LEADERBOARD
+         share of account's effective usage
+----------------------------------------------------
+
+   1. ch29576      [##################]  92.6% <-
+   2. rz40377      [#.................]   7.4%
+   ...
+```
+
+Data comes from `sshare`/`sacctmgr`, scoped to your own Slurm account
+only -- never an unscoped cluster-wide query. If `sshare` isn't
+available (e.g. off-cluster, or in `--demo` mode without Slurm), this
+page and key are simply hidden.
+
 ### Top jobs
 
 Press `t` to see your hungriest jobs by CPU-hours, plus the failure
@@ -195,6 +233,7 @@ hall of shame:
 | `m` | Monthly ledger |
 | `h` | Activity report (weekly/daily/hourly) |
 | `t` | Top jobs + failure hall of shame |
+| `f` | Fair share standing + lab leaderboard (if `sshare` available) |
 | `s` | Save receipt to `~/slurm_receipt_30d.txt` + copy to clipboard |
 | `j`/`k` or arrows | Scroll |
 | `PgUp`/`PgDn` | Scroll fast |

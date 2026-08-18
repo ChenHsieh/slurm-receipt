@@ -710,6 +710,97 @@ def build_linechart_page(stats, days, layer_idx=0):
 
     return lines
 
+def build_fairshare_page(fs_data, user):
+    """Fair-share / priority standing page, with a lab leaderboard.
+
+    Scoped deliberately to the user's own Slurm account -- see fairshare.py.
+    """
+    lines = []
+    a = lines.append
+
+    a(("=" * W, "dim"))
+    a((_ctr("FAIR SHARE"), "title"))
+    a((_ctr("(your standing in the priority queue)"), "dim"))
+    a(("=" * W, "dim"))
+    a(("", "normal"))
+
+    if not fs_data:
+        a((_ctr("Fair share data unavailable."), "dim"))
+        a((_ctr("(sshare/sacctmgr not found, or not on Slurm)"), "dim"))
+        a(("", "normal"))
+        return lines
+
+    self_row = fs_data["self"]
+    account = fs_data["account"]
+    board = fs_data["leaderboard"]
+    rank = fs_data.get("rank")
+    fs = self_row.get("fairshare")
+    eff = self_row.get("effectv_usage", 0.0)
+
+    a((f"  Account:  {account}", "normal"))
+    if rank and board:
+        a((f"  Rank:     #{rank} of {len(board)} in {account}", "normal"))
+    a(("", "normal"))
+
+    a(("-" * W, "dim"))
+    a((_ctr("PRIORITY SCORE"), "heading"))
+    a(("-" * W, "dim"))
+    a(("", "normal"))
+
+    if fs is not None:
+        a((_ctr(f"FairShare: {fs:.4f}"), "conversion"))
+        bar_n = int(min(max(fs, 0.0), 1.0) * 30)
+        a((_ctr("[" + "#" * bar_n + "." * (30 - bar_n) + "]"), "bar"))
+        a(("", "normal"))
+        if fs < 0.2:
+            a((_ctr("Low priority. The scheduler remembers"), "roast"))
+            a((_ctr("every core-hour you've ever used."), "roast"))
+        elif fs < 0.5:
+            a((_ctr("Middling priority. Give or take, you've"), "roast"))
+            a((_ctr("used your fair share."), "roast"))
+        else:
+            a((_ctr("High priority. You've been saving up."), "roast"))
+        a(("", "normal"))
+        a((_ctr("Closer to 1.0 = higher scheduling priority"), "dim"))
+        a((_ctr("(you've used less than your fair share)"), "dim"))
+    else:
+        a((_ctr("No fairshare score yet -- no usage on record."), "dim"))
+    a(("", "normal"))
+
+    a((_right("  Effective usage", f"{eff * 100:.1f}% of {account}"), "normal"))
+    a(("", "normal"))
+
+    if board:
+        a(("-" * W, "dim"))
+        a((_ctr(f"{account.upper()} LEADERBOARD"), "heading"))
+        a((_ctr("share of account's effective usage"), "dim"))
+        a(("-" * W, "dim"))
+        a(("", "normal"))
+
+        max_eff = max((r["effectv_usage"] for r in board), default=0) or 1
+        for i, r in enumerate(board, 1):
+            is_self = r["user"] == user
+            n = int(r["effectv_usage"] / max_eff * 18) if max_eff else 0
+            bar = "#" * n + "." * (18 - n)
+            marker = " <-" if is_self else ""
+            pct = r["effectv_usage"] * 100
+            label = f"  {i:>2}. {r['user']:<12s} [{bar}] {pct:>5.1f}%{marker}"
+            a((label, "highlight" if is_self else "normal"))
+        a(("", "normal"))
+
+        if rank == 1 and len(board) > 1 and eff > 0.5:
+            a((_ctr(f"You're carrying {eff * 100:.0f}% of {account}'s"), "roast"))
+            a((_ctr("compute usage. Your labmates say thanks."), "roast"))
+        elif rank == 1 and len(board) > 1:
+            a((_ctr(f"#1 in {account}. Wear it with pride."), "roast"))
+        elif len(board) == 1:
+            a((_ctr("You're the only member of this account."), "dim"))
+            a((_ctr("Undisputed champion by default."), "dim"))
+
+    a(("", "normal"))
+    return lines
+
+
 def build_top_jobs_page(stats):
     """Top jobs and failure hall of shame."""
     lines = []
@@ -756,10 +847,15 @@ def build_top_jobs_page(stats):
     return lines
 
 
-def render_snap(user, days, stats, nrg, costs, roasts, conv_idx=0):
+def render_snap(user, days, stats, nrg, costs, roasts, conv_idx=0, fs_data=None):
     """Plain-text receipt for sharing."""
     pages = build_receipt_page(user, days, stats, nrg, costs, conv_idx)
     out = [text for text, _ in pages]
+
+    if fs_data:
+        out.append("")
+        fs_pages = build_fairshare_page(fs_data, user)
+        out.extend(text for text, _ in fs_pages)
 
     if roasts:
         out.append("")
@@ -781,19 +877,19 @@ def render_snap(user, days, stats, nrg, costs, roasts, conv_idx=0):
 
 # ── TUI main loop ───────────────────────────────────────────────────
 
-def run_tui(user, days, stats, nrg, costs, roasts):
+def run_tui(user, days, stats, nrg, costs, roasts, fs_data=None):
     """Launch interactive curses TUI."""
     snap_path = os.path.join(os.path.expanduser("~"), f"slurm_receipt_{days}d.txt")
 
     # Auto-save on entry (graceful if home is not writable)
     try:
-        snap = render_snap(user, days, stats, nrg, costs, roasts)
+        snap = render_snap(user, days, stats, nrg, costs, roasts, fs_data=fs_data)
         with open(snap_path, "w") as f:
             f.write(snap)
     except OSError:
         snap_path = None  # can't write, skip save
 
-    curses.wrapper(_tui_main, user, days, stats, nrg, costs, roasts, snap_path)
+    curses.wrapper(_tui_main, user, days, stats, nrg, costs, roasts, snap_path, fs_data)
 
     # After TUI exits, print where the receipt was saved
     if snap_path:
@@ -802,7 +898,7 @@ def run_tui(user, days, stats, nrg, costs, roasts):
         sys.stderr.write("\n")
 
 
-def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
+def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path, fs_data=None):
     curses.curs_set(0)
     curses.start_color()
     curses.use_default_colors()
@@ -869,6 +965,8 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
             content = build_roast_page(all_roasts, roast_idx)
         elif page == "top":
             content = build_top_jobs_page(stats)
+        elif page == "fairshare":
+            content = build_fairshare_page(fs_data, user)
         else:
             content = build_receipt_page(user, days, stats, nrg, costs, conv_idx)
 
@@ -890,7 +988,8 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
         # Status bar
         scroll_pct = f" {int(scroll / max_scroll * 100)}%%" if max_scroll > 0 else ""
         if page == "receipt":
-            status = f" [r]oast [m]onthly [h]eatmap [l]ine [t]op [s]nap [<>]rotate{scroll_pct} [q]uit "
+            fshare_key = " [f]airshare" if fs_data else ""
+            status = f" [r]oast [m]onthly [h]eatmap [l]ine [t]op{fshare_key} [s]nap [<>]rotate{scroll_pct} [q]uit "
         elif page == "roast":
             status = f" [<>]rotate [b]ack [q]uit "
         elif page == "line":
@@ -926,6 +1025,8 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
                             page = "line"; scroll = 0
                         elif _click_in(status, "[t]op", mx):
                             page = "top"; scroll = 0
+                        elif fs_data and _click_in(status, "[f]airshare", mx):
+                            page = "fairshare"; scroll = 0
                         elif _click_in(status, "[s]nap", mx):
                             key = ord("s")
                         elif _click_in(status, "[<>]rotate", mx):
@@ -963,8 +1064,10 @@ def _tui_main(stdscr, user, days, stats, nrg, costs, roasts, snap_path):
             layer_idx = (layer_idx + 1) % len(LINE_LAYERS)
         elif key == ord("t") and page == "receipt":
             page = "top"; scroll = 0
+        elif key == ord("f") and page == "receipt" and fs_data:
+            page = "fairshare"; scroll = 0
         elif key == ord("s") and page == "receipt":
-            snap = render_snap(user, days, stats, nrg, costs, all_roasts, conv_idx)
+            snap = render_snap(user, days, stats, nrg, costs, all_roasts, conv_idx, fs_data=fs_data)
             saved = False
             if snap_path:
                 try:

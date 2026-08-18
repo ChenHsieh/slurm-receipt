@@ -13,6 +13,7 @@ from slurm_receipt.sacct import fetch_jobs, compute_stats, generate_demo_jobs
 from slurm_receipt.calc import energy, cloud_cost
 from slurm_receipt.roast import generate_roasts
 from slurm_receipt.tui import run_tui, render_snap
+from slurm_receipt.fairshare import fetch_fairshare_data, generate_demo_fairshare
 
 
 # ── Loading animation with live data preview ─────────────────────────
@@ -181,6 +182,14 @@ def main():
 
         loader.stop(f"Found {len(jobs):,} jobs")
 
+    # Phase 1b: Fair share (best-effort -- missing sshare just hides the page)
+    if args.demo:
+        fs_data = generate_demo_fairshare(user)
+    else:
+        loader.start("Checking fair share...")
+        fs_data = fetch_fairshare_data(user)
+        loader.stop()
+
     # Phase 2: Compute
     loader.start("Crunching numbers...")
     stats = compute_stats(jobs)
@@ -195,7 +204,7 @@ def main():
 
     # Phase 3: Output
     if args.snap or args.snap_file:
-        text = render_snap(user, days, stats, nrg, costs, roasts)
+        text = render_snap(user, days, stats, nrg, costs, roasts, fs_data=fs_data)
 
         if args.snap_file:
             path = args.snap_file
@@ -218,7 +227,7 @@ def main():
 
     # Phase 3b: TUI (run_tui will print save path on quit)
     sys.stderr.write("\n")
-    run_tui(user, days, stats, nrg, costs, roasts)
+    run_tui(user, days, stats, nrg, costs, roasts, fs_data=fs_data)
 
 
 if __name__ == "__main__":
